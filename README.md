@@ -26,6 +26,7 @@ Synthetic Data Generator
    ├── staging.stg_transactions (cleaned view)
    └── marts.mart_daily_category_spend (analytics table)
 ```
+![Lineage Graph](docs/lineage.png)
 
 ## Tech Stack
 
