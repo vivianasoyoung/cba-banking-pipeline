@@ -1,12 +1,15 @@
 """
 transaction_pipeline_dag.py
 -----------------------------
-Daily DAG that:
-  1. Checks raw CSV data exists
-  2. Validates data quality
-  3. Loads new transactions into raw.transactions
-  4. Runs dbt transformations
-  5. Logs the pipeline run result
+Daily DAG (ingestion only):
+  1. Verifies raw CSV data exists
+  2. Validates data quality (NULLs, dupes, invalid types, future dates)
+  3. Loads accounts (upsert) and transactions (incremental via high-water mark)
+  4. Logs the run outcome to raw.pipeline_runs
+
+Downstream transformations live in the cba-dbt-analytics repo and are
+scheduled independently. Credentials come from the Airflow Connection
+`cba_postgres` — no secrets in code.
 """
 
 from datetime import datetime, timedelta
@@ -14,21 +17,14 @@ import logging
 import os
 
 import pandas as pd
-import psycopg2
-from psycopg2.extras import execute_values
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+from psycopg2.extras import execute_values
 
 log = logging.getLogger(__name__)
 
-DB_CONFIG = {
-    "host":     os.getenv("PIPELINE_DB_HOST", "postgres"),
-    "port":     5432,
-    "dbname":   "cba_pipeline",
-    "user":     "airflow",
-    "password": "airflow",
-}
-
+POSTGRES_CONN_ID      = "cba_postgres"
 RAW_TRANSACTIONS_PATH = "/opt/airflow/data/raw/transactions.csv"
 RAW_ACCOUNTS_PATH     = "/opt/airflow/data/raw/accounts.csv"
 
@@ -40,74 +36,60 @@ default_args = {
 }
 
 
-# ── Task 1: Validate source files exist ─────────────────────────────────────
-def check_source_files(**context):
-    for path in [RAW_TRANSACTIONS_PATH, RAW_ACCOUNTS_PATH]:
+def _get_conn():
+    return PostgresHook(postgres_conn_id=POSTGRES_CONN_ID).get_conn()
+
+
+def check_source_files(**_):
+    for path in (RAW_TRANSACTIONS_PATH, RAW_ACCOUNTS_PATH):
         if not os.path.exists(path):
             raise FileNotFoundError(
-                f"Source file not found: {path}\n"
-                f"Run: python scripts/generate_transactions.py --months 6 --accounts 500"
+                f"Source file not found: {path}. "
+                "Run: python scripts/generate_transactions.py --months 6 --accounts 500"
             )
-        size_mb = os.path.getsize(path) / 1_000_000
-        log.info(f"Found {path} ({size_mb:.1f} MB)")
+        log.info("Found %s (%.1f MB)", path, os.path.getsize(path) / 1_000_000)
 
 
-# ── Task 2: Data quality checks ─────────────────────────────────────────────
 def run_quality_checks(**context):
     df = pd.read_csv(RAW_TRANSACTIONS_PATH, parse_dates=["transaction_date"])
+    issues: list[str] = []
 
-    issues = []
+    for col in ("transaction_id", "account_id", "transaction_date", "amount", "transaction_type"):
+        n = int(df[col].isna().sum())
+        if n:
+            issues.append(f"NULL values in {col}: {n} rows")
 
-    # Null checks
-    critical_cols = ["transaction_id", "account_id", "transaction_date", "amount", "transaction_type"]
-    for col in critical_cols:
-        null_count = df[col].isna().sum()
-        if null_count > 0:
-            issues.append(f"NULL values in {col}: {null_count} rows")
+    n_dupe = int(df["transaction_id"].duplicated().sum())
+    if n_dupe:
+        issues.append(f"Duplicate transaction_ids: {n_dupe}")
 
-    # Duplicate transaction IDs
-    dupe_count = df["transaction_id"].duplicated().sum()
-    if dupe_count > 0:
-        issues.append(f"Duplicate transaction_ids: {dupe_count}")
+    n_neg = int((df["amount"] < 0).sum())
+    if n_neg:
+        issues.append(f"Negative amounts: {n_neg} rows")
 
-    # Negative amounts
-    neg_count = (df["amount"] < 0).sum()
-    if neg_count > 0:
-        issues.append(f"Negative amounts: {neg_count} rows")
+    n_invalid = int((~df["transaction_type"].isin({"DEBIT", "CREDIT"})).sum())
+    if n_invalid:
+        issues.append(f"Invalid transaction_type values: {n_invalid} rows")
 
-    # Invalid transaction types
-    valid_types = {"DEBIT", "CREDIT"}
-    invalid_types = df[~df["transaction_type"].isin(valid_types)]
-    if len(invalid_types) > 0:
-        issues.append(f"Invalid transaction_type values: {len(invalid_types)} rows")
+    n_future = int((df["transaction_date"] > datetime.now()).sum())
+    if n_future:
+        issues.append(f"Future-dated transactions: {n_future} rows")
 
-    # Future-dated transactions
-    future = df[df["transaction_date"] > datetime.now()]
-    if len(future) > 0:
-        issues.append(f"Future-dated transactions: {len(future)} rows")
-
-    # Push quality stats to XCom for audit log
-    context["ti"].xcom_push(key="quality_stats", value={
-        "total_rows":    len(df),
-        "null_issues":   len([i for i in issues if "NULL" in i]),
-        "dupe_issues":   dupe_count,
-        "issues":        issues,
-    })
+    context["ti"].xcom_push(key="quality_issues", value=issues)
+    context["ti"].xcom_push(key="quality_total_rows", value=int(len(df)))
 
     if issues:
-        log.warning(f"Quality issues found:\n" + "\n".join(f"  - {i}" for i in issues))
+        log.warning("Quality issues:\n%s", "\n".join(f"  - {i}" for i in issues))
     else:
-        log.info(f"All quality checks passed. {len(df):,} rows ready for ingestion.")
+        log.info("All quality checks passed. %s rows.", f"{len(df):,}")
 
 
-# ── Task 3: Load accounts (upsert) ──────────────────────────────────────────
-def load_accounts(**context):
+def load_accounts(**_):
     df = pd.read_csv(RAW_ACCOUNTS_PATH)
     df["loaded_at"] = datetime.now()
+    records = list(df.itertuples(index=False, name=None))
 
-    records = [tuple(row) for row in df.itertuples(index=False, name=None)]
-
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = _get_conn()
     try:
         with conn.cursor() as cur:
             execute_values(
@@ -118,38 +100,39 @@ def load_accounts(**context):
                     account_type, open_date, balance, credit_limit, loaded_at
                 ) VALUES %s
                 ON CONFLICT (account_id) DO UPDATE SET
-                    balance    = EXCLUDED.balance,
-                    loaded_at  = EXCLUDED.loaded_at
+                    balance   = EXCLUDED.balance,
+                    loaded_at = EXCLUDED.loaded_at
                 """,
                 records,
                 page_size=1000,
             )
+            inserted_or_updated = cur.rowcount
         conn.commit()
-        log.info(f"Upserted {len(records):,} accounts into raw.accounts")
     finally:
         conn.close()
 
+    log.info("Upserted %s accounts.", f"{inserted_or_updated:,}")
 
-# ── Task 4: Load transactions (incremental) ─────────────────────────────────
+
 def load_transactions(**context):
-    run_date = context["ds"]  # YYYY-MM-DD string
     df = pd.read_csv(RAW_TRANSACTIONS_PATH, parse_dates=["transaction_date"])
 
-    # Incremental: only load transactions for this dag run date
-    day_df = df[df["transaction_date"].dt.date.astype(str) == run_date].copy()
-
-    if day_df.empty:
-        log.info(f"No transactions found for {run_date} — skipping load.")
-        context["ti"].xcom_push(key="rows_loaded", value=0)
-        return
-
-    day_df["loaded_at"] = datetime.now()
-    records = [tuple(row) for row in day_df.itertuples(index=False, name=None)]
-
-    conn = psycopg2.connect(**DB_CONFIG)
-    rows_loaded = 0
-    rows_rejected = 0
+    conn = _get_conn()
     try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(MAX(transaction_date), '1970-01-01'::timestamp) FROM raw.transactions")
+            high_water = cur.fetchone()[0]
+        log.info("High-water mark: %s", high_water)
+
+        new_df = df[df["transaction_date"] > high_water].copy()
+        if new_df.empty:
+            log.info("No new transactions since high-water mark; nothing to load.")
+            context["ti"].xcom_push(key="rows_loaded", value=0)
+            return
+
+        new_df["loaded_at"] = datetime.now()
+        records = list(new_df.itertuples(index=False, name=None))
+
         with conn.cursor() as cur:
             execute_values(
                 cur,
@@ -165,87 +148,67 @@ def load_transactions(**context):
                 records,
                 page_size=500,
             )
-            rows_loaded = cur.rowcount if cur.rowcount > 0 else len(records)
+            rows_loaded = cur.rowcount
         conn.commit()
-        log.info(f"Loaded {rows_loaded:,} transactions for {run_date}")
-    except Exception as e:
+    except Exception:
         conn.rollback()
-        rows_rejected = len(records)
-        log.error(f"Load failed: {e}")
         raise
     finally:
         conn.close()
 
-    context["ti"].xcom_push(key="rows_loaded", value=rows_loaded)
-    context["ti"].xcom_push(key="rows_rejected", value=rows_rejected)
+    log.info("Loaded %s transactions.", f"{rows_loaded:,}")
+    context["ti"].xcom_push(key="rows_loaded", value=int(rows_loaded))
 
 
-# ── Task 5: Log pipeline run ─────────────────────────────────────────────────
 def log_pipeline_run(**context):
     ti = context["ti"]
-    rows_loaded   = ti.xcom_pull(task_ids="load_transactions",  key="rows_loaded")   or 0
-    rows_rejected = ti.xcom_pull(task_ids="load_transactions",  key="rows_rejected") or 0
-    quality_stats = ti.xcom_pull(task_ids="run_quality_checks", key="quality_stats") or {}
+    rows_loaded = ti.xcom_pull(task_ids="load_transactions", key="rows_loaded") or 0
+    issues      = ti.xcom_pull(task_ids="run_quality_checks", key="quality_issues") or []
 
-    conn = psycopg2.connect(**DB_CONFIG)
+    status = "SUCCESS" if not issues else "SUCCESS_WITH_WARNINGS"
+
+    conn = _get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO raw.pipeline_runs
-                    (dag_id, run_date, rows_ingested, rows_rejected, status, started_at, completed_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    (dag_id, run_date, rows_ingested, rows_rejected,
+                     status, quality_issues, started_at, completed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     context["dag"].dag_id,
                     context["ds"],
                     rows_loaded,
-                    rows_rejected,
-                    "SUCCESS",
+                    0,
+                    status,
+                    "\n".join(issues) if issues else None,
                     context["dag_run"].start_date,
                     datetime.now(),
                 ),
             )
         conn.commit()
-        log.info(f"Pipeline run logged: {rows_loaded} rows ingested, {rows_rejected} rejected.")
     finally:
         conn.close()
 
+    log.info("Audit logged: status=%s rows=%s", status, rows_loaded)
 
-# ── DAG definition ───────────────────────────────────────────────────────────
+
 with DAG(
     dag_id="cba_transaction_pipeline",
-    description="Daily ingestion of CBA-style banking transaction data",
-    schedule_interval="0 6 * * *",   # 6am daily
+    description="Daily ingestion of CBA-style banking transactions",
+    schedule="0 6 * * *",
     start_date=datetime(2024, 1, 1),
     catchup=False,
     default_args=default_args,
     tags=["banking", "ingestion", "daily"],
 ) as dag:
 
-    t1_check_files = PythonOperator(
-        task_id="check_source_files",
-        python_callable=check_source_files,
-    )
+    t1 = PythonOperator(task_id="check_source_files",  python_callable=check_source_files)
+    t2 = PythonOperator(task_id="run_quality_checks",  python_callable=run_quality_checks)
+    t3 = PythonOperator(task_id="load_accounts",       python_callable=load_accounts)
+    t4 = PythonOperator(task_id="load_transactions",   python_callable=load_transactions)
+    t5 = PythonOperator(task_id="log_pipeline_run",    python_callable=log_pipeline_run, trigger_rule="all_done")
 
-    t2_quality = PythonOperator(
-        task_id="run_quality_checks",
-        python_callable=run_quality_checks,
-    )
-
-    t3_accounts = PythonOperator(
-        task_id="load_accounts",
-        python_callable=load_accounts,
-    )
-
-    t4_transactions = PythonOperator(
-        task_id="load_transactions",
-        python_callable=load_transactions,
-    )
-
-    t5_log = PythonOperator(
-        task_id="log_pipeline_run",
-        python_callable=log_pipeline_run,
-    )
-
-    t1_check_files >> t2_quality >> t3_accounts >> t4_transactions >> t5_log
+    t1 >> t2 >> t3 >> t4 >> t5
