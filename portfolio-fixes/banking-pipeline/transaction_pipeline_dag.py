@@ -1,14 +1,15 @@
 """
 transaction_pipeline_dag.py
 -----------------------------
-Daily DAG:
+Daily DAG (ingestion only):
   1. Verifies raw CSV data exists
   2. Validates data quality (NULLs, dupes, invalid types, future dates)
   3. Loads accounts (upsert) and transactions (incremental via high-water mark)
-  4. Runs dbt build (run + test) for the downstream transformation layer
-  5. Logs the run outcome to raw.pipeline_runs
+  4. Logs the run outcome to raw.pipeline_runs
 
-Credentials come from the Airflow Connection `cba_postgres`. No secrets in code.
+Downstream transformations live in the cba-dbt-analytics repo and are
+scheduled independently. Credentials come from the Airflow Connection
+`cba_postgres` — no secrets in code.
 """
 
 from datetime import datetime, timedelta
@@ -18,7 +19,6 @@ import os
 import pandas as pd
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.operators.bash import BashOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from psycopg2.extras import execute_values
 
@@ -27,8 +27,6 @@ log = logging.getLogger(__name__)
 POSTGRES_CONN_ID      = "cba_postgres"
 RAW_TRANSACTIONS_PATH = "/opt/airflow/data/raw/transactions.csv"
 RAW_ACCOUNTS_PATH     = "/opt/airflow/data/raw/accounts.csv"
-DBT_PROJECT_DIR       = os.getenv("DBT_PROJECT_DIR", "/opt/airflow/dbt")
-DBT_PROFILES_DIR      = os.getenv("DBT_PROFILES_DIR", "/opt/airflow/dbt")
 
 default_args = {
     "owner":            "data-engineering",
@@ -42,7 +40,6 @@ def _get_conn():
     return PostgresHook(postgres_conn_id=POSTGRES_CONN_ID).get_conn()
 
 
-# ── Task 1: source files exist ───────────────────────────────────────────────
 def check_source_files(**_):
     for path in (RAW_TRANSACTIONS_PATH, RAW_ACCOUNTS_PATH):
         if not os.path.exists(path):
@@ -53,7 +50,6 @@ def check_source_files(**_):
         log.info("Found %s (%.1f MB)", path, os.path.getsize(path) / 1_000_000)
 
 
-# ── Task 2: data quality ─────────────────────────────────────────────────────
 def run_quality_checks(**context):
     df = pd.read_csv(RAW_TRANSACTIONS_PATH, parse_dates=["transaction_date"])
     issues: list[str] = []
@@ -88,7 +84,6 @@ def run_quality_checks(**context):
         log.info("All quality checks passed. %s rows.", f"{len(df):,}")
 
 
-# ── Task 3: accounts (upsert) ────────────────────────────────────────────────
 def load_accounts(**_):
     df = pd.read_csv(RAW_ACCOUNTS_PATH)
     df["loaded_at"] = datetime.now()
@@ -119,7 +114,6 @@ def load_accounts(**_):
     log.info("Upserted %s accounts.", f"{inserted_or_updated:,}")
 
 
-# ── Task 4: transactions (incremental via high-water mark) ───────────────────
 def load_transactions(**context):
     df = pd.read_csv(RAW_TRANSACTIONS_PATH, parse_dates=["transaction_date"])
 
@@ -166,7 +160,6 @@ def load_transactions(**context):
     context["ti"].xcom_push(key="rows_loaded", value=int(rows_loaded))
 
 
-# ── Task 6: audit log ────────────────────────────────────────────────────────
 def log_pipeline_run(**context):
     ti = context["ti"]
     rows_loaded = ti.xcom_pull(task_ids="load_transactions", key="rows_loaded") or 0
@@ -202,32 +195,20 @@ def log_pipeline_run(**context):
     log.info("Audit logged: status=%s rows=%s", status, rows_loaded)
 
 
-# ── DAG ──────────────────────────────────────────────────────────────────────
 with DAG(
     dag_id="cba_transaction_pipeline",
-    description="Daily ingestion + dbt build for CBA-style banking transactions",
+    description="Daily ingestion of CBA-style banking transactions",
     schedule="0 6 * * *",
     start_date=datetime(2024, 1, 1),
     catchup=False,
     default_args=default_args,
-    tags=["banking", "ingestion", "dbt", "daily"],
+    tags=["banking", "ingestion", "daily"],
 ) as dag:
 
     t1 = PythonOperator(task_id="check_source_files",  python_callable=check_source_files)
     t2 = PythonOperator(task_id="run_quality_checks",  python_callable=run_quality_checks)
     t3 = PythonOperator(task_id="load_accounts",       python_callable=load_accounts)
     t4 = PythonOperator(task_id="load_transactions",   python_callable=load_transactions)
+    t5 = PythonOperator(task_id="log_pipeline_run",    python_callable=log_pipeline_run, trigger_rule="all_done")
 
-    t5_dbt = BashOperator(
-        task_id="dbt_build",
-        bash_command=(
-            f"cd {DBT_PROJECT_DIR} && "
-            f"dbt deps --profiles-dir {DBT_PROFILES_DIR} && "
-            f"dbt build --profiles-dir {DBT_PROFILES_DIR} "
-            f"--fail-fast --warn-error"
-        ),
-    )
-
-    t6 = PythonOperator(task_id="log_pipeline_run",    python_callable=log_pipeline_run, trigger_rule="all_done")
-
-    t1 >> t2 >> t3 >> t4 >> t5_dbt >> t6
+    t1 >> t2 >> t3 >> t4 >> t5
