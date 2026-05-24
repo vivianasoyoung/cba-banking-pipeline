@@ -1,0 +1,39 @@
+Add these two services to the existing docker-compose.yml, alongside the
+zookeeper / kafka / kafka-ui / postgres services. Then `docker compose up`
+boots the entire pipeline end-to-end.
+
+  producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.producer
+    depends_on:
+      kafka:
+        condition: service_started
+    environment:
+      KAFKA_BROKER: kafka:29092
+      KAFKA_TOPIC: transactions
+    restart: unless-stopped
+
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    depends_on:
+      kafka:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER: kafka:29092
+      KAFKA_TOPIC: transactions
+      KAFKA_DLQ_TOPIC: transactions.dlq
+      PG_HOST: postgres
+      PG_PORT: 5432
+      PG_DB: fraud_detection
+      PG_USER: fraud
+      PG_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD must be set in .env}
+    restart: unless-stopped
+
+Also: remove the hardcoded POSTGRES_PASSWORD: fraud and switch to:
+    POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD must be set in .env}
+Ship a .env.example with PG_PASSWORD=change_me.

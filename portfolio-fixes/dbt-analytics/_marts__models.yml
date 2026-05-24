@@ -1,0 +1,47 @@
+version: 2
+
+models:
+  - name: mart_customer_segments
+    description: |
+      One row per account. Segments customers by average monthly spend over
+      the last 12 calendar months (dormant months count as zero).
+    columns:
+      - name: account_id
+        tests:
+          - not_null
+          - unique
+      - name: customer_segment
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['Premium', 'High Value', 'Regular', 'Low Activity']
+      - name: avg_monthly_spend
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+  - name: mart_category_trends
+    description: One row per (transaction_month × merchant_category).
+    columns:
+      - name: transaction_month
+        tests: [not_null]
+      - name: merchant_category
+        tests: [not_null]
+      - name: total_spend
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [transaction_month, merchant_category]
+
+  - name: mart_monthly_summary
+    description: One row per transaction_month. Portfolio-level KPIs.
+    columns:
+      - name: transaction_month
+        tests:
+          - not_null
+          - unique
+      - name: active_accounts
+        tests: [not_null]
+      - name: total_spend
+        tests: [not_null]

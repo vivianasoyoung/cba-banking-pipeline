@@ -1,0 +1,31 @@
+version: 2
+
+models:
+  - name: int_customer_monthly_category_spend
+    description: |
+      DEBIT spend aggregated to (account_id × transaction_month × merchant_category).
+      Reused by category trend and monthly summary marts.
+    columns:
+      - name: account_id
+        tests: [not_null]
+      - name: transaction_month
+        tests: [not_null]
+      - name: merchant_category
+        tests: [not_null]
+      - name: total_spend
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+
+  - name: int_customer_monthly_spend
+    description: |
+      DEBIT spend aggregated to (account_id × transaction_month).
+      Categories rolled up. Used by customer segmentation.
+    columns:
+      - name: account_id
+        tests: [not_null]
+      - name: transaction_month
+        tests: [not_null]
+      - name: total_spend
+        tests: [not_null]

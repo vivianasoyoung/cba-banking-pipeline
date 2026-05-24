@@ -1,0 +1,39 @@
+%% Save as architecture.mmd in each repo. GitHub renders Mermaid in READMEs:
+%% ```mermaid
+%%   <paste contents>
+%% ```
+
+flowchart LR
+    subgraph banking-pipeline
+        gen[generate_transactions.py]
+        airflow[Airflow DAG]
+        raw[(Postgres<br/>raw schema)]
+        gen --> airflow --> raw
+    end
+
+    subgraph dbt-analytics
+        stg[staging views]
+        intm[intermediate views]
+        marts[mart tables<br/>segments, trends, summary]
+        raw --> stg --> intm --> marts
+    end
+
+    subgraph fraud-streaming
+        prod[producer]
+        kafka[(Kafka)]
+        cons[consumer + rules]
+        flagged[(Postgres<br/>fraud.flagged_transactions)]
+        prod --> kafka --> cons --> flagged
+    end
+
+    subgraph feature-store
+        cf[compute_features.py]
+        feast[(Feast<br/>online + offline)]
+        train[train_model.py]
+        mlflow[(MLflow Registry)]
+        api[FastAPI /score]
+        raw --> cf
+        flagged --> cf
+        cf --> feast --> train --> mlflow --> api
+        feast --> api
+    end

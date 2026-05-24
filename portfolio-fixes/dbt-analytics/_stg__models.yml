@@ -1,0 +1,58 @@
+version: 2
+
+models:
+  - name: stg_transactions
+    description: |
+      Cleaned, typed transaction records. One row per non-declined,
+      positive-amount transaction. Source: raw.transactions (loaded by
+      cba-banking-pipeline's Airflow DAG).
+    columns:
+      - name: transaction_id
+        description: Surrogate primary key from the source system.
+        tests:
+          - not_null
+          - unique
+      - name: account_id
+        description: FK to stg_accounts.account_id.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_accounts')
+              field: account_id
+      - name: transaction_date
+        description: Date of the transaction (UTC).
+        tests:
+          - not_null
+      - name: amount
+        description: Absolute transaction amount in AUD (always positive).
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: transaction_type
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['DEBIT', 'CREDIT']
+      - name: channel
+        tests:
+          - accepted_values:
+              values: ['EFTPOS', 'ONLINE', 'ATM', 'BPAY']
+
+  - name: stg_accounts
+    description: Cleaned account dimension. One row per active account.
+    columns:
+      - name: account_id
+        tests:
+          - not_null
+          - unique
+      - name: customer_id
+        tests:
+          - not_null
+      - name: account_type
+        tests:
+          - accepted_values:
+              values: ['SAVINGS', 'EVERYDAY', 'CREDIT', 'OFFSET']
+      - name: open_date
+        tests:
+          - not_null
