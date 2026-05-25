@@ -1,5 +1,4 @@
 apache-airflow-providers-postgres==5.10.0
 pandas==2.2.0
 psycopg2-binary==2.9.9
-dbt-core==1.7.9
-dbt-postgres==1.7.9
+faker==24.0.0
