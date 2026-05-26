@@ -57,6 +57,25 @@ This is the part nobody else's portfolio has. Spend the most words here.
 
 ---
 
+## Positioning note (DE primary + AI/MLE angle)
+
+This post is your strongest asset for BOTH target paths. Frame the intro around
+the transition: "As an insight analyst I consumed data pipelines; I built this to
+become the engineer who makes them reliable — and my AI master's is why the ML
+serving layer is in here too."
+
+- For **DE readers**: the pipeline + dbt + streaming + CI are the headline; the
+  feature store shows you understand the layer ML sits on.
+- For **ML Engineer readers**: the labels-from-streaming decision + feature store
+  are the headline; the rest is the data foundation you built underneath.
+
+The labels-from-streaming section (part 3) is deliberately the bridge between the
+two — it's a data-engineering decision that directly determines whether the ML
+works. That's exactly the DE/MLE overlap your AI degree lets you speak to.
+See positioning.md for the reusable narrative across LinkedIn / resume / GitHub.
+
+---
+
 ## Assets to embed (gather these = the screenshot task)
 - [ ] Cross-repo Mermaid diagram (have it)
 - [ ] Airflow DAG green run
