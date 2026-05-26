@@ -1,6 +1,8 @@
-# CBA Transaction Pipeline
+# Australian Banking Transaction Pipeline
 
-An end-to-end batch data pipeline simulating a banking transaction ingestion system, modelled on Commonwealth Bank of Australia's transaction data structures.
+An end-to-end batch data pipeline simulating a retail banking transaction ingestion system, modelled on Australian banking transaction data structures.
+
+> **Disclaimer:** Personal learning project built with entirely synthetic, programmatically generated data. Not affiliated with, endorsed by, or using systems, schemas, or data from any financial institution. "Australian banking" refers to generic retail-banking data structures (e.g. BSB formats, common merchant categories), not any specific bank.
 
 ## How this fits with the rest of the project
 
@@ -8,12 +10,12 @@ This is one of four repos that together form an end-to-end banking data platform
 
 | Repo | Stack | Role |
 | --- | --- | --- |
-| **[`cba-banking-pipeline`](https://github.com/vivianasoyoung/cba-banking-pipeline)** *(You are here)* | Airflow, Postgres, Docker | Foundation: synthetic data generation + batch ingestion |
-| [`cba-dbt-analytics`](https://github.com/vivianasoyoung/cba-dbt-analytics) | dbt-postgres, dbt_utils | Staging → intermediate → marts transformations |
-| [`cba-fraud-streaming`](https://github.com/vivianasoyoung/cba-fraud-streaming) | Kafka, Python, Postgres | Real-time rule-based fraud detection |
-| [`cba-feature-store`](https://github.com/vivianasoyoung/cba-feature-store) | Feast, MLflow, FastAPI | ML feature store + model serving |
+| **[`aus-banking-pipeline`](https://github.com/vivianasoyoung/aus-banking-pipeline)** *(You are here)* | Airflow, Postgres, Docker | Foundation: synthetic data generation + batch ingestion |
+| [`aus-dbt-analytics`](https://github.com/vivianasoyoung/aus-dbt-analytics) | dbt-postgres, dbt_utils | Staging → intermediate → marts transformations |
+| [`aus-fraud-streaming`](https://github.com/vivianasoyoung/aus-fraud-streaming) | Kafka, Python, Postgres | Real-time rule-based fraud detection |
+| [`aus-feature-store`](https://github.com/vivianasoyoung/aus-feature-store) | Feast, MLflow, FastAPI | ML feature store + model serving |
 
-This repo is **ingestion-only**. Downstream transformations live in `cba-dbt-analytics` and are scheduled independently.
+This repo is **ingestion-only**. Downstream transformations live in `aus-dbt-analytics` and are scheduled independently.
 
 ---
 
@@ -37,7 +39,7 @@ Synthetic Data Generator
    PostgreSQL (raw schema)
         │
         ▼
-   Consumed downstream by cba-dbt-analytics
+   Consumed downstream by aus-dbt-analytics
 ```
 
 ## Tech Stack
@@ -62,7 +64,7 @@ pip install faker pandas
 python scripts/generate_transactions.py --months 6 --accounts 500
 ```
 
-Generates approximately 200,000 synthetic transactions spanning six months across 500 accounts with authentic Australian Bank State Branch codes.
+Generates ~200,000 synthetic transactions across 500 accounts over six months, using Australian Bank State Branch (BSB) code formats.
 
 ### 2. Configure environment
 
@@ -77,7 +79,6 @@ cp .env.example .env
 docker-compose up -d
 ```
 
-Services:
 | Service | URL | Credentials |
 |---|---|---|
 | Airflow | http://localhost:8080 | admin / admin |
@@ -85,52 +86,35 @@ Services:
 
 ### 4. Trigger the pipeline
 
-In Airflow UI:
-1. Configure the `cba_postgres` Airflow Connection (host=`postgres`, dbname=`cba_pipeline`, schema=`raw`, user/password from `.env`)
-2. Enable the `cba_transaction_pipeline` DAG
-3. Trigger a manual run
-4. Watch tasks execute in sequence
+In the Airflow UI: configure the Postgres Airflow Connection (host `postgres`, schema `raw`, credentials from `.env`), enable the `transaction_pipeline` DAG, and trigger a run.
 
 ## Data Model
 
-### Raw Layer (`raw` schema)
 | Table | Description |
 |---|---|
-| `raw.transactions` | All ingested transactions (incremental, idempotent via `ON CONFLICT DO NOTHING`) |
+| `raw.transactions` | Ingested transactions (incremental, idempotent via `ON CONFLICT DO NOTHING`) |
 | `raw.accounts` | Account master data (upsert) |
-| `raw.pipeline_runs` | Audit log of every DAG run, including any quality issues found |
+| `raw.pipeline_runs` | Audit log of every DAG run, including any data-quality issues found |
 
 ## Data Quality Checks
 
-The DAG validates each ingestion batch for:
-- NULLs in critical columns (`transaction_id`, `account_id`, `transaction_date`, `amount`, `transaction_type`)
-- Duplicate `transaction_id` values
-- Negative amounts
-- Invalid `transaction_type` values (must be `DEBIT` or `CREDIT`)
-- Future-dated transactions
-
-Issues are logged to `raw.pipeline_runs.quality_issues` and the run is marked `SUCCESS_WITH_WARNINGS`.
+Each ingestion batch is validated for: NULLs in critical columns, duplicate `transaction_id`s, negative amounts, invalid `transaction_type` values (`DEBIT`/`CREDIT`), and future-dated transactions. Issues are logged to `raw.pipeline_runs` and the run is marked `SUCCESS_WITH_WARNINGS`.
 
 ## Australian Banking Context
 
-- Bank State Branch numbers follow regional Australian conventions
-- Merchant categories mirror authentic Australian retail and service patterns
+- BSB numbers follow regional Australian formatting conventions
+- Merchant categories mirror common Australian retail/service patterns
 - Account types: SAVINGS, TRANSACTION, OFFSET
-- Transaction channels: EFTPOS, ATM, ONLINE, BPAY
+- Channels: EFTPOS, ATM, ONLINE, BPAY
 
 ## Project Structure
 
 ```
-cba-banking-pipeline/
-├── airflow/
-│   └── dags/
-│       └── transaction_pipeline_dag.py
-├── docker/
-│   └── init.sql
-├── scripts/
-│   └── generate_transactions.py
-├── data/
-│   └── raw/                       # gitignored — regenerated locally
+aus-banking-pipeline/
+├── airflow/dags/transaction_pipeline_dag.py
+├── docker/init.sql
+├── scripts/generate_transactions.py
+├── data/raw/                    # gitignored — regenerated locally
 ├── docker-compose.yml
 ├── .env.example
 └── README.md
