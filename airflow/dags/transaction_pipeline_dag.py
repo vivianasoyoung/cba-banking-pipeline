@@ -7,7 +7,7 @@ Daily DAG (ingestion only):
   3. Loads accounts (upsert) and transactions (incremental via high-water mark)
   4. Logs the run outcome to raw.pipeline_runs
 
-Downstream transformations live in the cba-dbt-analytics repo and are
+Downstream transformations live in the aus-dbt-analytics repo and are
 scheduled independently. Credentials come from the Airflow Connection
 `cba_postgres` — no secrets in code.
 """
@@ -197,7 +197,7 @@ def log_pipeline_run(**context):
 
 with DAG(
     dag_id="cba_transaction_pipeline",
-    description="Daily ingestion of CBA-style banking transactions",
+    description="Daily ingestion of Australian retail banking transactions",
     schedule="0 6 * * *",
     start_date=datetime(2024, 1, 1),
     catchup=False,
